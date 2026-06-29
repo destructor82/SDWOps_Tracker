@@ -6,7 +6,6 @@
 <title>SDWOpsTracker</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@2.44.0/tabler-icons.min.css">
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
 :root{
@@ -310,19 +309,33 @@ body.arrange .arrange-hint{display:block;}
 
 <script>
 /* ══════════════════════════════════════════
-   SUPABASE CONFIG
+   SUPABASE — PURE REST (no JS client)
 ══════════════════════════════════════════ */
 const SB_URL = 'https://totqmgbytobtknvnttcy.supabase.co';
 const SB_KEY = 'sb_publishable_WEPFtIfApbM6Hne1DQo3Lg_qE_Ut_i0';
+const SB_HEADERS = {
+  'Content-Type': 'application/json',
+  'apikey': SB_KEY,
+  'Authorization': 'Bearer ' + SB_KEY,
+  'Prefer': 'return=minimal'
+};
 
-// Create client — no auth overrides needed for publishable key
-const sb = supabase.createClient(SB_URL, SB_KEY, {
-  auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false }
-});
+async function sbFetch(path, options) {
+  const url = SB_URL + '/rest/v1/' + path;
+  const res = await fetch(url, {
+    ...options,
+    headers: { ...SB_HEADERS, ...(options && options.headers ? options.headers : {}) }
+  });
+  if (!res.ok) {
+    let errMsg = 'HTTP ' + res.status;
+    try { const j = await res.json(); errMsg = j.message || j.error || j.hint || JSON.stringify(j); } catch(e) {}
+    throw new Error(errMsg);
+  }
+  const text = await res.text();
+  return text ? JSON.parse(text) : [];
+}
 
-/* ══════════════════════════════════════════
-   ROW MAPPERS
-══════════════════════════════════════════ */
+/* ── ROW MAPPERS ── */
 function dbRowToItem(row, sec) {
   return {
     id: String(row.id),
@@ -361,39 +374,28 @@ function itemToDbRow(item) {
 async function loadFromDB() {
   setSyncState('loading', 'Connecting…');
   try {
-    const res = await sb.from('items').select('*').order('created_at', { ascending: true });
-    if (res.error) throw res.error;
-
+    const data = await sbFetch('items?select=*&order=created_at.asc');
     sections.forEach(s => { items[s.id] = []; });
-
-    (res.data || []).forEach(row => {
-      let sec = sections.find(s => s.id === row.sec_id);
-      if (!sec) sec = sections.find(s => s.label === row.section_label);
-      if (!sec) sec = sections[0];
+    (data || []).forEach(row => {
+      let sec = sections.find(s => s.id === row.sec_id)
+               || sections.find(s => s.label === row.section_label)
+               || sections[0];
       if (!items[sec.id]) items[sec.id] = [];
       items[sec.id].push(dbRowToItem(row, sec));
     });
-
     setSyncState('ok', 'Synced');
     setTimeout(() => setSyncState('idle', 'All saved'), 2500);
   } catch(err) {
-    console.error('loadFromDB error:', err);
-    const msg = (err && (err.message || err.details || err.hint)) ? (err.message || err.details || err.hint) : JSON.stringify(err);
-    let hint = msg;
-    if (msg.includes('does not exist') || (msg.includes('relation') && msg.includes('exist'))) {
-      hint = 'Table "items" not found — run the SQL setup in Supabase SQL Editor.';
-    } else if (msg.includes('401') || msg.includes('403') || msg.toLowerCase().includes('api key') || msg.toLowerCase().includes('unauthorized')) {
-      hint = 'Invalid API key — check your Supabase anon key.';
-    } else if (msg.toLowerCase().includes('fetch') || msg.toLowerCase().includes('network') || msg.toLowerCase().includes('failed to fetch')) {
-      hint = 'Network error — check your internet connection.';
-    }
+    console.error('loadFromDB:', err.message);
+    let hint = err.message;
+    if (hint.includes('does not exist') || hint.includes('relation')) hint = 'Table "items" not found — run the SQL setup.';
+    else if (hint.includes('401') || hint.includes('403') || hint.toLowerCase().includes('unauthorized')) hint = 'Invalid API key.';
+    else if (hint.toLowerCase().includes('failed to fetch') || hint.toLowerCase().includes('network')) hint = 'Network error — check connection.';
     setSyncState('error', 'DB error');
     showToast('Load failed: ' + hint, 'error');
     const ls = document.getElementById('loading-screen');
     if (ls) ls.querySelector('.loading-text').textContent = '⚠ ' + hint;
     setTimeout(() => hideLoading(), 5000);
-    renderCards();
-    return;
   }
   renderCards();
   hideLoading();
@@ -405,18 +407,20 @@ async function loadFromDB() {
 async function upsertItem(item) {
   setSyncState('saving', 'Saving…');
   try {
-    const res = await sb.from('items').upsert(itemToDbRow(item), { onConflict: 'id' });
-    if (res.error) throw res.error;
+    await sbFetch('items', {
+      method: 'POST',
+      headers: { 'Prefer': 'resolution=merge-duplicates,return=minimal' },
+      body: JSON.stringify(itemToDbRow(item))
+    });
     dirtyItems.delete(item.id);
     if (dirtyItems.size === 0 && dirtyDeletes.size === 0) {
       setSyncState('ok', 'Saved');
       setTimeout(() => setSyncState('idle', 'All saved'), 2000);
     }
   } catch(err) {
-    console.error('upsertItem error:', err);
-    const msg = (err && err.message) ? err.message : JSON.stringify(err);
+    console.error('upsertItem:', err.message);
     setSyncState('error', 'Save failed');
-    showToast('Save failed: ' + msg, 'error');
+    showToast('Save failed: ' + err.message, 'error');
     dirtyItems.add(item.id);
   }
 }
@@ -427,23 +431,21 @@ async function upsertItem(item) {
 async function deleteFromDB(itemId) {
   setSyncState('saving', 'Deleting…');
   try {
-    const res = await sb.from('items').delete().eq('id', String(itemId));
-    if (res.error) throw res.error;
+    await sbFetch('items?id=eq.' + encodeURIComponent(String(itemId)), { method: 'DELETE' });
     dirtyDeletes.delete(itemId);
     if (dirtyItems.size === 0 && dirtyDeletes.size === 0) {
       setSyncState('ok', 'Deleted');
       setTimeout(() => setSyncState('idle', 'All saved'), 2000);
     }
   } catch(err) {
-    console.error('deleteFromDB error:', err);
-    const msg = (err && err.message) ? err.message : JSON.stringify(err);
+    console.error('deleteFromDB:', err.message);
     setSyncState('error', 'Delete failed');
-    showToast('Delete failed: ' + msg, 'error');
+    showToast('Delete failed: ' + err.message, 'error');
   }
 }
 
 /* ══════════════════════════════════════════
-   SAVE NOW — push everything to DB
+   SAVE NOW
 ══════════════════════════════════════════ */
 async function saveNow() {
   const btn = document.getElementById('btn-save-now');
@@ -455,17 +457,16 @@ async function saveNow() {
     sections.forEach(sec => {
       (items[sec.id] || []).forEach(it => allRows.push(itemToDbRow(it)));
     });
-    if (allRows.length) {
-      // upsert in chunks of 50 to avoid payload limits
-      for (let i = 0; i < allRows.length; i += 50) {
-        const chunk = allRows.slice(i, i + 50);
-        const res = await sb.from('items').upsert(chunk, { onConflict: 'id' });
-        if (res.error) throw res.error;
-      }
+    // upsert in chunks of 50
+    for (let i = 0; i < allRows.length; i += 50) {
+      await sbFetch('items', {
+        method: 'POST',
+        headers: { 'Prefer': 'resolution=merge-duplicates,return=minimal' },
+        body: JSON.stringify(allRows.slice(i, i + 50))
+      });
     }
     for (const id of dirtyDeletes) {
-      const res = await sb.from('items').delete().eq('id', String(id));
-      if (res.error) throw res.error;
+      await sbFetch('items?id=eq.' + encodeURIComponent(String(id)), { method: 'DELETE' });
     }
     dirtyItems.clear();
     dirtyDeletes.clear();
@@ -473,42 +474,76 @@ async function saveNow() {
     showToast('All data saved to database');
     setTimeout(() => setSyncState('idle', 'All saved'), 3000);
   } catch(err) {
-    console.error('saveNow error:', err);
-    const msg = (err && err.message) ? err.message : JSON.stringify(err);
+    console.error('saveNow:', err.message);
     setSyncState('error', 'Save failed');
-    showToast('Save failed: ' + msg, 'error');
+    showToast('Save failed: ' + err.message, 'error');
   }
   btn.disabled = false;
   btn.innerHTML = '<i class="ti ti-device-floppy"></i> Save now';
 }
 
 /* ══════════════════════════════════════════
-   REALTIME SUBSCRIPTION
+   REALTIME — polling fallback (30s)
+   Real Supabase Realtime requires WS which
+   works fine on hosted pages; polling ensures
+   it works even when WS is blocked.
 ══════════════════════════════════════════ */
+let _lastPoll = Date.now();
+let _pollTimer = null;
+
 function subscribeRealtime() {
-  sb.channel('sdwops-items')
-    .on('postgres_changes',
-      { event: '*', schema: 'public', table: 'items' },
-      payload => handleRealtimeEvent(payload)
-    )
-    .subscribe(status => {
-      console.log('Realtime status:', status);
-      if (status === 'CHANNEL_ERROR') {
-        // Realtime not critical — app still works via manual save
-        console.warn('Realtime unavailable — using manual sync only');
-      }
+  // Start polling every 30 seconds for cross-device sync
+  _pollTimer = setInterval(pollForChanges, 30000);
+  // Also try native Supabase Realtime via WS
+  tryWebSocketRealtime();
+}
+
+async function pollForChanges() {
+  try {
+    const data = await sbFetch('items?select=*&order=created_at.asc');
+    sections.forEach(s => { items[s.id] = []; });
+    (data || []).forEach(row => {
+      let sec = sections.find(s => s.id === row.sec_id)
+               || sections.find(s => s.label === row.section_label)
+               || sections[0];
+      if (!items[sec.id]) items[sec.id] = [];
+      items[sec.id].push(dbRowToItem(row, sec));
     });
+    renderCards();
+  } catch(err) {
+    console.warn('Poll error:', err.message);
+  }
+}
+
+function tryWebSocketRealtime() {
+  // Only try if supabase JS client is available
+  if (typeof supabase === 'undefined') return;
+  try {
+    const wsSB = supabase.createClient(SB_URL, SB_KEY, {
+      auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false }
+    });
+    wsSB.channel('sdwops-items')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'items' }, payload => {
+        handleRealtimeEvent(payload);
+        // Got a realtime event — stop polling to save bandwidth
+        if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = setInterval(pollForChanges, 60000); }
+      })
+      .subscribe(status => {
+        console.log('WS Realtime:', status);
+      });
+  } catch(e) {
+    console.warn('WS realtime failed, using polling only');
+  }
 }
 
 function handleRealtimeEvent(payload) {
   const { eventType, new: newRow, old: oldRow } = payload;
   if (eventType === 'INSERT' || eventType === 'UPDATE') {
     if (!newRow || !newRow.id) return;
-    let sec = sections.find(s => s.id === newRow.sec_id);
-    if (!sec) sec = sections.find(s => s.label === newRow.section_label);
-    if (!sec) sec = sections[0];
+    let sec = sections.find(s => s.id === newRow.sec_id)
+             || sections.find(s => s.label === newRow.section_label)
+             || sections[0];
     const newItem = dbRowToItem(newRow, sec);
-    // remove old copy from every section
     sections.forEach(s => { items[s.id] = (items[s.id] || []).filter(i => i.id !== String(newRow.id)); });
     if (!items[sec.id]) items[sec.id] = [];
     items[sec.id].push(newItem);
@@ -943,8 +978,11 @@ async function confirmImport(){
   try{
     // chunk upserts to avoid payload limits
     for (let i = 0; i < toUpsert.length; i += 50) {
-      const res = await sb.from('items').upsert(toUpsert.slice(i,i+50).map(itemToDbRow),{onConflict:'id'});
-      if(res.error) throw res.error;
+      await sbFetch('items', {
+        method: 'POST',
+        headers: { 'Prefer': 'resolution=merge-duplicates,return=minimal' },
+        body: JSON.stringify(toUpsert.slice(i,i+50).map(itemToDbRow))
+      });
     }
     setSyncState('ok','Import saved');
     showToast(`Import complete: ${added} added, ${updated} updated`);
