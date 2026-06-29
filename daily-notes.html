@@ -326,17 +326,24 @@ function openDBConfig() {
 
 async function sbFetch(path, options) {
   const url = SB_URL + '/rest/v1/' + path;
-  const res = await fetch(url, {
-    ...options,
-    headers: { ...SB_HEADERS, ...(options && options.headers ? options.headers : {}) }
-  });
-  if (!res.ok) {
-    let errMsg = 'HTTP ' + res.status;
-    try { const j = await res.json(); errMsg = j.message || j.error || j.hint || JSON.stringify(j); } catch(e) {}
-    throw new Error(errMsg);
+  const controller = new AbortController();
+  const timer = setTimeout(function(){ controller.abort(); }, 10000);
+  try {
+    const headers = Object.assign({}, SB_HEADERS, options && options.headers ? options.headers : {});
+    const res = await fetch(url, Object.assign({}, options, { headers: headers, signal: controller.signal }));
+    clearTimeout(timer);
+    if (!res.ok) {
+      let errMsg = 'HTTP ' + res.status;
+      try { const j = await res.json(); errMsg = j.message || j.error || j.hint || JSON.stringify(j); } catch(e2) {}
+      throw new Error(errMsg);
+    }
+    const text = await res.text();
+    return text ? JSON.parse(text) : [];
+  } catch(e) {
+    clearTimeout(timer);
+    if (e.name === 'AbortError') throw new Error('Request timed out after 10s');
+    throw e;
   }
-  const text = await res.text();
-  return text ? JSON.parse(text) : [];
 }
 
 /* ── ROW MAPPERS ── */
@@ -376,28 +383,24 @@ function itemToDbRow(item) {
    LOAD ALL DATA
 ══════════════════════════════════════════ */
 async function loadFromDB() {
-  setSyncState('loading', 'Connecting…');
+  setSyncState('loading', 'Syncing…');
   try {
-    const data = await sbFetch('items?select=*&order=created_at.asc');
+    const data = await sbFetch('items?select=*');
     sections.forEach(s => { items[s.id] = []; });
-    (data || []).forEach(row => {
-      let sec = sections.find(s => s.id === row.sec_id)
-               || sections.find(s => s.label === row.section_label)
-               || sections[0];
+    (data || []).forEach(function(row) {
+      var sec = sections.find(function(s){ return s.id === row.sec_id; });
+      if (!sec) sec = sections.find(function(s){ return s.label === row.section_label; });
+      if (!sec) sec = sections[0];
       if (!items[sec.id]) items[sec.id] = [];
       items[sec.id].push(dbRowToItem(row, sec));
     });
     renderCards();
-    setSyncState('ok', 'Synced');
-    setTimeout(() => setSyncState('idle', 'All saved'), 2500);
+    setSyncState('ok', 'Synced ✓');
+    setTimeout(function(){ setSyncState('idle', 'All saved'); }, 2500);
   } catch(err) {
-    console.error('loadFromDB error:', err.message);
-    let hint = err.message || 'Unknown error';
-    if (hint.includes('does not exist') || hint.includes('relation')) hint = 'Table not found — run SQL setup in Supabase.';
-    else if (hint.includes('401') || hint.includes('403') || hint.toLowerCase().includes('unauthorized') || hint.toLowerCase().includes('api key')) hint = 'Invalid API key — check Supabase anon key.';
-    else if (hint.toLowerCase().includes('failed to fetch') || hint.toLowerCase().includes('networkerror') || hint.toLowerCase().includes('load failed')) hint = 'Cannot reach Supabase — check internet connection.';
-    setSyncState('error', hint);
-    showToast('DB: ' + hint, 'error');
+    console.error('loadFromDB:', err);
+    setSyncState('error', 'Sync error — see console');
+    showToast('Sync error: ' + (err.message || String(err)), 'error');
   }
 }
 
@@ -450,33 +453,29 @@ async function deleteFromDB(itemId) {
 async function saveNow() {
   const btn = document.getElementById('btn-save-now');
   btn.disabled = true;
-  btn.innerHTML = '<i class="ti ti-loader" style="animation:spin .8s linear infinite;"></i> Saving…';
-  setSyncState('saving', 'Saving all…');
+  btn.innerHTML = '<i class="ti ti-loader"></i> Saving…';
+  setSyncState('saving', 'Saving…');
   try {
     const allRows = [];
-    sections.forEach(sec => {
-      (items[sec.id] || []).forEach(it => allRows.push(itemToDbRow(it)));
+    sections.forEach(function(sec) {
+      (items[sec.id] || []).forEach(function(it) { allRows.push(itemToDbRow(it)); });
     });
-    // upsert in chunks of 50
-    for (let i = 0; i < allRows.length; i += 50) {
+    if (allRows.length > 0) {
       await sbFetch('items', {
         method: 'POST',
         headers: { 'Prefer': 'resolution=merge-duplicates,return=minimal' },
-        body: JSON.stringify(allRows.slice(i, i + 50))
+        body: JSON.stringify(allRows)
       });
-    }
-    for (const id of dirtyDeletes) {
-      await sbFetch('items?id=eq.' + encodeURIComponent(String(id)), { method: 'DELETE' });
     }
     dirtyItems.clear();
     dirtyDeletes.clear();
-    setSyncState('ok', 'All saved');
-    showToast('All data saved to database');
-    setTimeout(() => setSyncState('idle', 'All saved'), 3000);
+    setSyncState('ok', 'Saved ✓');
+    showToast('All data saved!');
+    setTimeout(function(){ setSyncState('idle', 'All saved'); }, 2000);
   } catch(err) {
-    console.error('saveNow:', err.message);
+    console.error('saveNow error:', err);
     setSyncState('error', 'Save failed');
-    showToast('Save failed: ' + err.message, 'error');
+    showToast('Save failed: ' + (err.message || String(err)), 'error');
   }
   btn.disabled = false;
   btn.innerHTML = '<i class="ti ti-device-floppy"></i> Save now';
@@ -500,7 +499,7 @@ function subscribeRealtime() {
 
 async function pollForChanges() {
   try {
-    const data = await sbFetch('items?select=*&order=created_at.asc');
+    const data = await sbFetch('items?select=*');
     sections.forEach(s => { items[s.id] = []; });
     (data || []).forEach(row => {
       let sec = sections.find(s => s.id === row.sec_id)
