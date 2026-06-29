@@ -231,6 +231,7 @@ body.arrange .arrange-hint{display:block;}
         <button class="col-btn" data-cols="4" onclick="setCols(4)">4</button>
         <button class="col-btn active" data-cols="auto" onclick="setCols('auto')">Auto</button>
       </div>
+      <button class="btn btn-ghost" onclick="openDBConfig()" title="Update Supabase credentials"><i class="ti ti-database"></i> DB Config</button>
       <button class="btn btn-ghost" id="arrange-btn" onclick="toggleArrange()"><i class="ti ti-layout-grid"></i> Arrange</button>
       <button class="btn btn-ghost" onclick="exportExcel()"><i class="ti ti-table-export"></i> Export</button>
       <button class="btn btn-ghost" onclick="openImport()"><i class="ti ti-table-import"></i> Import</button>
@@ -311,14 +312,26 @@ body.arrange .arrange-hint{display:block;}
 /* ══════════════════════════════════════════
    SUPABASE — PURE REST (no JS client)
 ══════════════════════════════════════════ */
-const SB_URL = 'https://totqmgbytobtknvnttcy.supabase.co';
-const SB_KEY = 'sb_publishable_WEPFtIfApbM6Hne1DQo3Lg_qE_Ut_i0';
+const SB_URL = localStorage.getItem('sb_url') || 'https://totqmgbytobtknvnttcy.supabase.co';
+const SB_KEY = localStorage.getItem('sb_key') || 'sb_publishable_WEPFtIfApbM6Hne1DQo3Lg_qE_Ut_i0';
 const SB_HEADERS = {
   'Content-Type': 'application/json',
   'apikey': SB_KEY,
   'Authorization': 'Bearer ' + SB_KEY,
   'Prefer': 'return=minimal'
 };
+
+// DB Config modal helpers
+function openDBConfig() {
+  const url = prompt('Supabase Project URL:', SB_URL);
+  if (!url) return;
+  const key = prompt('Supabase anon/public key (starts with eyJ...):', SB_KEY);
+  if (!key) return;
+  localStorage.setItem('sb_url', url.trim());
+  localStorage.setItem('sb_key', key.trim());
+  showToast('Credentials saved — reloading…');
+  setTimeout(() => location.reload(), 1000);
+}
 
 async function sbFetch(path, options) {
   const url = SB_URL + '/rest/v1/' + path;
@@ -372,6 +385,9 @@ function itemToDbRow(item) {
    LOAD ALL DATA
 ══════════════════════════════════════════ */
 async function loadFromDB() {
+  // Always show the app immediately — DB loads in background
+  renderCards();
+  hideLoading();
   setSyncState('loading', 'Connecting…');
   try {
     const data = await sbFetch('items?select=*&order=created_at.asc');
@@ -383,22 +399,18 @@ async function loadFromDB() {
       if (!items[sec.id]) items[sec.id] = [];
       items[sec.id].push(dbRowToItem(row, sec));
     });
+    renderCards();
     setSyncState('ok', 'Synced');
     setTimeout(() => setSyncState('idle', 'All saved'), 2500);
   } catch(err) {
-    console.error('loadFromDB:', err.message);
-    let hint = err.message;
-    if (hint.includes('does not exist') || hint.includes('relation')) hint = 'Table "items" not found — run the SQL setup.';
-    else if (hint.includes('401') || hint.includes('403') || hint.toLowerCase().includes('unauthorized')) hint = 'Invalid API key.';
-    else if (hint.toLowerCase().includes('failed to fetch') || hint.toLowerCase().includes('network')) hint = 'Network error — check connection.';
-    setSyncState('error', 'DB error');
-    showToast('Load failed: ' + hint, 'error');
-    const ls = document.getElementById('loading-screen');
-    if (ls) ls.querySelector('.loading-text').textContent = '⚠ ' + hint;
-    setTimeout(() => hideLoading(), 5000);
+    console.error('loadFromDB error:', err.message);
+    let hint = err.message || 'Unknown error';
+    if (hint.includes('does not exist') || hint.includes('relation')) hint = 'Table not found — run SQL setup in Supabase.';
+    else if (hint.includes('401') || hint.includes('403') || hint.toLowerCase().includes('unauthorized') || hint.toLowerCase().includes('api key')) hint = 'Invalid API key — check Supabase anon key.';
+    else if (hint.toLowerCase().includes('failed to fetch') || hint.toLowerCase().includes('networkerror') || hint.toLowerCase().includes('load failed')) hint = 'Cannot reach Supabase — check internet connection.';
+    setSyncState('error', hint);
+    showToast('DB: ' + hint, 'error');
   }
-  renderCards();
-  hideLoading();
 }
 
 /* ══════════════════════════════════════════
@@ -998,7 +1010,6 @@ async function confirmImport(){
    INIT
 ══════════════════════════════════════════ */
 document.getElementById('date-label').textContent = new Date().toLocaleDateString('en-ZA',{weekday:'long',year:'numeric',month:'long',day:'numeric'});
-renderCards();
 loadFromDB().then(()=>subscribeRealtime());
 </script>
 <script>
