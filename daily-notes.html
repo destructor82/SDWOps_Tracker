@@ -300,436 +300,309 @@ body.arrange .arrange-hint{display:block;}
 <div class="toast" id="toast"></div>
 
 <script>
-/* ══════════════════════════════════════════
-   SUPABASE — PURE REST (no JS client)
-══════════════════════════════════════════ */
-const SB_URL = localStorage.getItem('sb_url') || 'https://totqmgbytobtknvnttcy.supabase.co';
-const SB_KEY = localStorage.getItem('sb_key') || 'sb_publishable_WEPFtIfApbM6Hne1DQo3Lg_qE_Ut_i0';
-const SB_HEADERS = {
-  'Content-Type': 'application/json',
-  'apikey': SB_KEY,
-  'Authorization': 'Bearer ' + SB_KEY,
-  'Prefer': 'return=minimal'
-};
+const SB_URL = 'https://totqmgbytobtknvnttcy.supabase.co';
+const SB_KEY = 'sb_publishable_WEPFtIfApbM6Hne1DQo3Lg_qE_Ut_i0';
 
-// DB Config modal helpers
-function openDBConfig() {
-  const url = prompt('Supabase Project URL:', SB_URL);
-  if (!url) return;
-  const key = prompt('Supabase anon/public key (starts with eyJ...):', SB_KEY);
-  if (!key) return;
-  localStorage.setItem('sb_url', url.trim());
-  localStorage.setItem('sb_key', key.trim());
-  showToast('Credentials saved — reloading…');
-  setTimeout(() => location.reload(), 1000);
+/* ── SECTIONS ── */
+const DEFAULT_SECTIONS = [
+  {id:'absa-vaf', label:'ABSA VAF',      icon:'ti-building-bank',  color:'#4fa8ff', ba:0.13, bb:0.32},
+  {id:'absa-cc',  label:'ABSA CC',       icon:'ti-credit-card',    color:'#4fcfb8', ba:0.12, bb:0.30},
+  {id:'mq-fin',   label:'MQ Fin',        icon:'ti-chart-line',     color:'#a97aff', ba:0.13, bb:0.30},
+  {id:'todo',     label:'TO DO',         icon:'ti-checklist',      color:'#ffc142', ba:0.13, bb:0.32},
+  {id:'urgent',   label:'Urgent Action', icon:'ti-alert-triangle', color:'#ff6868', ba:0.13, bb:0.32},
+  {id:'reports',  label:'Reports',       icon:'ti-file-text',      color:'#4fdb96', ba:0.12, bb:0.30},
+  {id:'notes',    label:'NOTES',         icon:'ti-notebook',       color:'#d080ff', ba:0.12, bb:0.28},
+];
+let sections = DEFAULT_SECTIONS.map(s => ({...s}));
+let items = {};
+sections.forEach(s => { items[s.id] = []; });
+let editId=null, detailId=null, selPrio='', isLight=false, isArrange=false, dragSrcId=null;
+let pendingImportData=null, dirtyItems=new Set(), dirtyDeletes=new Set();
+let toastTimer=null, syncTimer=null;
+
+/* ── HELPERS ── */
+function hr(hex,a){const r=parseInt(hex.slice(1,3),16),g=parseInt(hex.slice(3,5),16),b=parseInt(hex.slice(5,7),16);return `rgba(${r},${g},${b},${a})`;}
+function today(){return new Date().toISOString().slice(0,10);}
+function fmtDate(s){if(!s)return '';const[y,m,d]=s.split('-');return `${d}/${m}/${y}`;}
+function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+function findItem(id){for(const s of sections){const it=(items[s.id]||[]).find(i=>i.id===String(id));if(it)return it;}return null;}
+function findSec(label){return sections.find(s=>s.label===label);}
+function hideLoading(){}
+
+/* ── SYNC UI ── */
+function setSyncState(state,text){
+  const el=document.getElementById('sync-indicator');
+  if(!el)return;
+  el.className='sync-indicator sync-'+state;
+  const t=document.getElementById('sync-text');
+  if(t)t.textContent=text;
 }
 
-async function sbFetch(path, options) {
-  const url = SB_URL + '/rest/v1/' + path;
-  const controller = new AbortController();
-  const timer = setTimeout(function(){ controller.abort(); }, 10000);
-  try {
-    const headers = Object.assign({}, SB_HEADERS, options && options.headers ? options.headers : {});
-    const res = await fetch(url, Object.assign({}, options, { headers: headers, signal: controller.signal }));
-    clearTimeout(timer);
-    if (!res.ok) {
-      let errMsg = 'HTTP ' + res.status;
-      try { const j = await res.json(); errMsg = j.message || j.error || j.hint || JSON.stringify(j); } catch(e2) {}
-      throw new Error(errMsg);
-    }
-    const text = await res.text();
-    return text ? JSON.parse(text) : [];
-  } catch(e) {
-    clearTimeout(timer);
-    if (e.name === 'AbortError') throw new Error('Request timed out after 10s');
-    throw e;
-  }
+/* ── TOAST ── */
+function showToast(msg,type){
+  const t=document.getElementById('toast');
+  if(!t)return;
+  t.className='toast '+(type==='error'?'error':'success');
+  t.innerHTML=(type==='error'?'<i class="ti ti-alert-circle" style="color:rgba(255,100,100,0.9);font-size:16px;"></i>':'<i class="ti ti-circle-check" style="color:rgba(80,210,140,0.9);font-size:16px;"></i>')+' '+msg;
+  t.classList.add('show');
+  if(toastTimer)clearTimeout(toastTimer);
+  toastTimer=setTimeout(()=>t.classList.remove('show'),4000);
+}
+
+/* ── DB REST ── */
+async function dbGet(){
+  const r=await fetch(SB_URL+'/rest/v1/items?select=*',{
+    headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json'}
+  });
+  if(!r.ok){const e=await r.text();throw new Error('GET '+r.status+': '+e);}
+  return r.json();
+}
+async function dbUpsert(rows){
+  const body=Array.isArray(rows)?rows:[rows];
+  const r=await fetch(SB_URL+'/rest/v1/items',{
+    method:'POST',
+    headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json','Prefer':'resolution=merge-duplicates,return=minimal'},
+    body:JSON.stringify(body)
+  });
+  if(!r.ok){const e=await r.text();throw new Error('UPSERT '+r.status+': '+e);}
+}
+async function dbDelete(id){
+  const r=await fetch(SB_URL+'/rest/v1/items?id=eq.'+encodeURIComponent(String(id)),{
+    method:'DELETE',
+    headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json'}
+  });
+  if(!r.ok){const e=await r.text();throw new Error('DELETE '+r.status+': '+e);}
 }
 
 /* ── ROW MAPPERS ── */
-function dbRowToItem(row, sec) {
+function toItem(row,sec){
   return {
-    id: String(row.id),
-    title: row.title || '',
-    notes: row.notes || '',
-    date: row.date || '',
-    type: row.type || 'task',
-    priority: row.priority || '',
-    sectionLabel: row.section_label || (sec ? sec.label : ''),
-    secId: sec ? sec.id : (row.sec_id || ''),
-    progress: row.progress || '',
-    done: !!row.done,
-    completionDate: row.completion_date || '',
+    id:String(row.id), title:row.title||'', notes:row.notes||'', date:row.date||'',
+    type:row.type||'task', priority:row.priority||'',
+    sectionLabel:row.section_label||(sec?sec.label:''), secId:sec?sec.id:(row.sec_id||''),
+    progress:row.progress||'', done:!!row.done, completionDate:row.completion_date||''
+  };
+}
+function toRow(item){
+  return {
+    id:String(item.id), title:item.title||'', notes:item.notes||'',
+    date:item.date||null, type:item.type||'task', priority:item.priority||'',
+    section_label:item.sectionLabel||'', sec_id:item.secId||'',
+    progress:item.progress||'', done:!!item.done, completion_date:item.completionDate||null
   };
 }
 
-function itemToDbRow(item) {
-  return {
-    id: String(item.id),
-    title: item.title || '',
-    notes: item.notes || '',
-    date: item.date || null,
-    type: item.type || 'task',
-    priority: item.priority || '',
-    section_label: item.sectionLabel || '',
-    sec_id: item.secId || '',
-    progress: item.progress || '',
-    done: !!item.done,
-    completion_date: item.completionDate || null,
-  };
-}
-
-/* ══════════════════════════════════════════
-   LOAD ALL DATA
-══════════════════════════════════════════ */
-async function loadFromDB() {
-  setSyncState('loading', 'Syncing…');
-  try {
-    const data = await sbFetch('items?select=*');
-    sections.forEach(s => { items[s.id] = []; });
-    (data || []).forEach(function(row) {
-      var sec = sections.find(function(s){ return s.id === row.sec_id; });
-      if (!sec) sec = sections.find(function(s){ return s.label === row.section_label; });
-      if (!sec) sec = sections[0];
-      if (!items[sec.id]) items[sec.id] = [];
-      items[sec.id].push(dbRowToItem(row, sec));
+/* ── LOAD ── */
+async function loadFromDB(){
+  setSyncState('loading','Syncing…');
+  try{
+    const data=await dbGet();
+    sections.forEach(s=>{items[s.id]=[];});
+    (data||[]).forEach(row=>{
+      let sec=sections.find(s=>s.id===row.sec_id)||sections.find(s=>s.label===row.section_label)||sections[0];
+      if(!items[sec.id])items[sec.id]=[];
+      items[sec.id].push(toItem(row,sec));
     });
     renderCards();
-    setSyncState('ok', 'Synced ✓');
-    setTimeout(function(){ setSyncState('idle', 'All saved'); }, 2500);
-  } catch(err) {
-    console.error('loadFromDB:', err);
-    setSyncState('error', 'Sync error — see console');
-    showToast('Sync error: ' + (err.message || String(err)), 'error');
+    setSyncState('ok','Synced ✓');
+    setTimeout(()=>setSyncState('idle','All saved'),2000);
+  }catch(e){
+    console.error('loadFromDB',e);
+    setSyncState('error','Sync failed');
+    showToast(e.message,'error');
   }
 }
 
-/* ══════════════════════════════════════════
-   UPSERT SINGLE ITEM
-══════════════════════════════════════════ */
-async function upsertItem(item) {
-  setSyncState('saving', 'Saving…');
-  try {
-    await sbFetch('items', {
-      method: 'POST',
-      headers: { 'Prefer': 'resolution=merge-duplicates,return=minimal' },
-      body: JSON.stringify(itemToDbRow(item))
-    });
-    dirtyItems.delete(item.id);
-    if (dirtyItems.size === 0 && dirtyDeletes.size === 0) {
-      setSyncState('ok', 'Saved');
-      setTimeout(() => setSyncState('idle', 'All saved'), 2000);
-    }
-  } catch(err) {
-    console.error('upsertItem:', err.message);
-    setSyncState('error', 'Save failed');
-    showToast('Save failed: ' + err.message, 'error');
-    dirtyItems.add(item.id);
+/* ── SAVE ONE ── */
+async function upsertItem(item){
+  setSyncState('saving','Saving…');
+  try{
+    await dbUpsert(toRow(item));
+    setSyncState('ok','Saved ✓');
+    setTimeout(()=>setSyncState('idle','All saved'),2000);
+  }catch(e){
+    console.error('upsertItem',e);
+    setSyncState('error','Save failed');
+    showToast(e.message,'error');
   }
 }
 
-/* ══════════════════════════════════════════
-   DELETE ITEM
-══════════════════════════════════════════ */
-async function deleteFromDB(itemId) {
-  setSyncState('saving', 'Deleting…');
-  try {
-    await sbFetch('items?id=eq.' + encodeURIComponent(String(itemId)), { method: 'DELETE' });
-    dirtyDeletes.delete(itemId);
-    if (dirtyItems.size === 0 && dirtyDeletes.size === 0) {
-      setSyncState('ok', 'Deleted');
-      setTimeout(() => setSyncState('idle', 'All saved'), 2000);
-    }
-  } catch(err) {
-    console.error('deleteFromDB:', err.message);
-    setSyncState('error', 'Delete failed');
-    showToast('Delete failed: ' + err.message, 'error');
+/* ── DELETE ONE ── */
+async function deleteFromDB(id){
+  setSyncState('saving','Deleting…');
+  try{
+    await dbDelete(id);
+    setSyncState('ok','Deleted ✓');
+    setTimeout(()=>setSyncState('idle','All saved'),2000);
+  }catch(e){
+    console.error('deleteFromDB',e);
+    setSyncState('error','Delete failed');
+    showToast(e.message,'error');
   }
 }
 
-/* ══════════════════════════════════════════
-   SAVE NOW
-══════════════════════════════════════════ */
-async function saveNow() {
-  const btn = document.getElementById('btn-save-now');
-  btn.disabled = true;
-  btn.innerHTML = '<i class="ti ti-loader"></i> Saving…';
-  setSyncState('saving', 'Saving…');
-  try {
-    const allRows = [];
-    sections.forEach(function(sec) {
-      (items[sec.id] || []).forEach(function(it) { allRows.push(itemToDbRow(it)); });
-    });
-    if (allRows.length > 0) {
-      await sbFetch('items', {
-        method: 'POST',
-        headers: { 'Prefer': 'resolution=merge-duplicates,return=minimal' },
-        body: JSON.stringify(allRows)
-      });
-    }
-    dirtyItems.clear();
-    dirtyDeletes.clear();
-    setSyncState('ok', 'Saved ✓');
+/* ── SAVE NOW ── */
+async function saveNow(){
+  const btn=document.getElementById('btn-save-now');
+  btn.disabled=true;
+  btn.innerHTML='<i class="ti ti-loader"></i> Saving…';
+  setSyncState('saving','Saving…');
+  try{
+    const rows=[];
+    sections.forEach(s=>(items[s.id]||[]).forEach(it=>rows.push(toRow(it))));
+    if(rows.length)await dbUpsert(rows);
+    setSyncState('ok','All saved ✓');
     showToast('All data saved!');
-    setTimeout(function(){ setSyncState('idle', 'All saved'); }, 2000);
-  } catch(err) {
-    console.error('saveNow error:', err);
-    setSyncState('error', 'Save failed');
-    showToast('Save failed: ' + (err.message || String(err)), 'error');
+    setTimeout(()=>setSyncState('idle','All saved'),2000);
+  }catch(e){
+    console.error('saveNow',e);
+    setSyncState('error','Save failed');
+    showToast(e.message,'error');
   }
-  btn.disabled = false;
-  btn.innerHTML = '<i class="ti ti-device-floppy"></i> Save now';
+  btn.disabled=false;
+  btn.innerHTML='<i class="ti ti-device-floppy"></i> Save now';
 }
 
-/* ══════════════════════════════════════════
-   REALTIME — polling fallback (30s)
-   Real Supabase Realtime requires WS which
-   works fine on hosted pages; polling ensures
-   it works even when WS is blocked.
-══════════════════════════════════════════ */
-let _lastPoll = Date.now();
-let _pollTimer = null;
-
-function subscribeRealtime() {
-  // Start polling every 30 seconds for cross-device sync
-  _pollTimer = setInterval(pollForChanges, 30000);
-  // Also try native Supabase Realtime via WS
-  tryWebSocketRealtime();
-}
-
-async function pollForChanges() {
-  try {
-    const data = await sbFetch('items?select=*');
-    sections.forEach(s => { items[s.id] = []; });
-    (data || []).forEach(row => {
-      let sec = sections.find(s => s.id === row.sec_id)
-               || sections.find(s => s.label === row.section_label)
-               || sections[0];
-      if (!items[sec.id]) items[sec.id] = [];
-      items[sec.id].push(dbRowToItem(row, sec));
-    });
-    renderCards();
-  } catch(err) {
-    console.warn('Poll error:', err.message);
-  }
-}
-
-function tryWebSocketRealtime() {
-  // Only try if supabase JS client is available
-  if (typeof supabase === 'undefined') return;
-  try {
-    const wsSB = supabase.createClient(SB_URL, SB_KEY, {
-      auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false }
-    });
-    wsSB.channel('sdwops-items')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'items' }, payload => {
-        handleRealtimeEvent(payload);
-        // Got a realtime event — stop polling to save bandwidth
-        if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = setInterval(pollForChanges, 60000); }
-      })
-      .subscribe(status => {
-        console.log('WS Realtime:', status);
+/* ── POLLING (every 30s) ── */
+function subscribeRealtime(){
+  setInterval(async()=>{
+    try{
+      const data=await dbGet();
+      sections.forEach(s=>{items[s.id]=[];});
+      (data||[]).forEach(row=>{
+        let sec=sections.find(s=>s.id===row.sec_id)||sections.find(s=>s.label===row.section_label)||sections[0];
+        if(!items[sec.id])items[sec.id]=[];
+        items[sec.id].push(toItem(row,sec));
       });
-  } catch(e) {
-    console.warn('WS realtime failed, using polling only');
-  }
+      renderCards();
+    }catch(e){console.warn('poll',e.message);}
+  },30000);
 }
 
-function handleRealtimeEvent(payload) {
-  const { eventType, new: newRow, old: oldRow } = payload;
-  if (eventType === 'INSERT' || eventType === 'UPDATE') {
-    if (!newRow || !newRow.id) return;
-    let sec = sections.find(s => s.id === newRow.sec_id)
-             || sections.find(s => s.label === newRow.section_label)
-             || sections[0];
-    const newItem = dbRowToItem(newRow, sec);
-    sections.forEach(s => { items[s.id] = (items[s.id] || []).filter(i => i.id !== String(newRow.id)); });
-    if (!items[sec.id]) items[sec.id] = [];
-    items[sec.id].push(newItem);
-    renderCards();
-    setSyncState('ok', 'Live update');
-    setTimeout(() => setSyncState('idle', 'All saved'), 2000);
-  } else if (eventType === 'DELETE') {
-    if (!oldRow || !oldRow.id) return;
-    const delId = String(oldRow.id);
-    sections.forEach(s => { items[s.id] = (items[s.id] || []).filter(i => i.id !== delId); });
-    renderCards();
-  }
+/* ── DB CONFIG ── */
+function openDBConfig(){
+  const url=prompt('Supabase URL:',SB_URL);
+  if(!url)return;
+  const key=prompt('Supabase anon key:',SB_KEY);
+  if(!key)return;
+  localStorage.setItem('sb_url',url.trim());
+  localStorage.setItem('sb_key',key.trim());
+  location.reload();
 }
 
-/* ══════════════════════════════════════════
-   HELPERS
-══════════════════════════════════════════ */
-function hr(hex, a) { const r=parseInt(hex.slice(1,3),16),g=parseInt(hex.slice(3,5),16),b=parseInt(hex.slice(5,7),16); return `rgba(${r},${g},${b},${a})`; }
-function today() { return new Date().toISOString().slice(0,10); }
-function fmtDate(s) { if(!s)return ''; const[y,m,d]=s.split('-'); return `${d}/${m}/${y}`; }
-function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-function findItem(id) { for(const s of sections){ const it=(items[s.id]||[]).find(i=>i.id===String(id)); if(it)return it; } return null; }
-function findSec(label) { return sections.find(s=>s.label===label); }
-function hideLoading() { /* no-op */ }
-
-/* ══════════════════════════════════════════
-   TOAST
-══════════════════════════════════════════ */
-function showToast(msg, type='success') {
-  const t = document.getElementById('toast');
-  t.className = 'toast ' + (type==='error' ? 'error' : 'success');
-  t.innerHTML = (type==='success' ? '<i class="ti ti-circle-check" style="color:rgba(80,210,140,0.9);font-size:16px;"></i>' : '<i class="ti ti-alert-circle" style="color:rgba(255,100,100,0.9);font-size:16px;"></i>') + ' ' + msg;
-  t.classList.add('show');
-  if(toastTimer) clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => t.classList.remove('show'), 3500);
+/* ── THEME ── */
+function toggleTheme(){
+  isLight=!isLight;
+  document.body.classList.toggle('light',isLight);
+  document.getElementById('theme-btn').innerHTML=isLight?'<i class="ti ti-moon"></i> Dark':'<i class="ti ti-sun"></i> Light';
 }
 
-/* ══════════════════════════════════════════
-   THEME
-══════════════════════════════════════════ */
-function toggleTheme() {
-  isLight = !isLight;
-  document.body.classList.toggle('light', isLight);
-  document.getElementById('theme-btn').innerHTML = isLight ? '<i class="ti ti-moon"></i> Dark' : '<i class="ti ti-sun"></i> Light';
+/* ── COLUMNS ── */
+function setCols(c){
+  const root=document.getElementById('layout-root');
+  root.className=c==='auto'?'cols-auto':'cols-'+c;
+  document.querySelectorAll('.col-btn').forEach(b=>b.classList.toggle('active',String(b.dataset.cols)===String(c)));
 }
 
-/* ══════════════════════════════════════════
-   COLUMNS
-══════════════════════════════════════════ */
-function setCols(c) {
-  const root = document.getElementById('layout-root');
-  root.className = c==='auto' ? 'cols-auto' : 'cols-'+c;
-  document.querySelectorAll('.col-btn').forEach(b => b.classList.toggle('active', String(b.dataset.cols)===String(c)));
+/* ── ARRANGE ── */
+function toggleArrange(){
+  isArrange=!isArrange;
+  document.body.classList.toggle('arrange',isArrange);
+  const btn=document.getElementById('arrange-btn');
+  btn.classList.toggle('active',isArrange);
+  btn.innerHTML=isArrange?'<i class="ti ti-check"></i> Done':'<i class="ti ti-layout-grid"></i> Arrange';
 }
-
-/* ══════════════════════════════════════════
-   ARRANGE
-══════════════════════════════════════════ */
-function toggleArrange() {
-  isArrange = !isArrange;
-  document.body.classList.toggle('arrange', isArrange);
-  const btn = document.getElementById('arrange-btn');
-  btn.classList.toggle('active', isArrange);
-  btn.innerHTML = isArrange ? '<i class="ti ti-check"></i> Done' : '<i class="ti ti-layout-grid"></i> Arrange';
-}
-
-/* ── Drag & Drop ── */
-function onDragStart(e, secId) { dragSrcId=secId; e.dataTransfer.effectAllowed='move'; setTimeout(()=>{ const el=document.querySelector(`[data-sec="${secId}"]`); if(el)el.classList.add('dragging'); },0); }
-function onDragEnd() { document.querySelectorAll('.card').forEach(c=>c.classList.remove('dragging','drag-over')); }
-function onDragOver(e, secId) { e.preventDefault(); e.dataTransfer.dropEffect='move'; document.querySelectorAll('.card').forEach(c=>c.classList.remove('drag-over')); const el=document.querySelector(`[data-sec="${secId}"]`); if(el&&secId!==dragSrcId)el.classList.add('drag-over'); }
-function onDrop(e, secId) {
-  e.preventDefault();
-  document.querySelectorAll('.card').forEach(c=>c.classList.remove('drag-over','dragging'));
+function onDragStart(e,secId){dragSrcId=secId;setTimeout(()=>{const el=document.querySelector(`[data-sec="${secId}"]`);if(el)el.classList.add('dragging');},0);}
+function onDragEnd(){document.querySelectorAll('.card').forEach(c=>c.classList.remove('dragging','drag-over'));}
+function onDragOver(e,secId){e.preventDefault();document.querySelectorAll('.card').forEach(c=>c.classList.remove('drag-over'));const el=document.querySelector(`[data-sec="${secId}"]`);if(el&&secId!==dragSrcId)el.classList.add('drag-over');}
+function onDrop(e,secId){
+  e.preventDefault();document.querySelectorAll('.card').forEach(c=>c.classList.remove('drag-over','dragging'));
   if(!dragSrcId||dragSrcId===secId)return;
-  const fi=sections.findIndex(s=>s.id===dragSrcId), ti=sections.findIndex(s=>s.id===secId);
+  const fi=sections.findIndex(s=>s.id===dragSrcId),ti=sections.findIndex(s=>s.id===secId);
   if(fi<0||ti<0)return;
-  const [mv]=sections.splice(fi,1); sections.splice(ti,0,mv);
-  dragSrcId=null; renderCards();
+  const[mv]=sections.splice(fi,1);sections.splice(ti,0,mv);
+  dragSrcId=null;renderCards();
 }
-
-/* ── Rename ── */
-function startRename(secId) {
-  const sec = sections.find(s=>s.id===secId); if(!sec)return;
-  const titleEl = document.getElementById('title-'+secId);
-  const inp = document.createElement('input');
-  inp.className='card-title-input'; inp.value=sec.label;
+function startRename(secId){
+  const sec=sections.find(s=>s.id===secId);if(!sec)return;
+  const titleEl=document.getElementById('title-'+secId);
+  const inp=document.createElement('input');
+  inp.className='card-title-input';inp.value=sec.label;
   inp.onclick=e=>e.stopPropagation();
-  inp.onblur=()=>finishRename(secId,inp.value);
-  inp.onkeydown=e=>{ if(e.key==='Enter')inp.blur(); if(e.key==='Escape'){inp.value=sec.label;inp.blur();} };
-  titleEl.replaceWith(inp); inp.focus(); inp.select();
-}
-function finishRename(secId, val) {
-  const sec = sections.find(s=>s.id===secId); if(!sec)return;
-  const newLabel = val.trim() || sec.label;
-  (items[secId]||[]).forEach(it=>{ it.sectionLabel=newLabel; dirtyItems.add(it.id); });
-  sec.label = newLabel;
-  renderCards();
-  // auto-save after rename
-  scheduleAutoSave();
+  inp.onblur=()=>{const newLabel=inp.value.trim()||sec.label;(items[secId]||[]).forEach(it=>{it.sectionLabel=newLabel;});sec.label=newLabel;renderCards();};
+  inp.onkeydown=e=>{if(e.key==='Enter')inp.blur();if(e.key==='Escape'){inp.value=sec.label;inp.blur();}};
+  titleEl.replaceWith(inp);inp.focus();inp.select();
 }
 
-function scheduleAutoSave() {
-  if(syncTimer) clearTimeout(syncTimer);
-  syncTimer = setTimeout(() => saveNow(), 2000);
+/* ── PRIORITY ── */
+function selP(btn){
+  document.querySelectorAll('.prio-btn').forEach(b=>{b.className='prio-btn';});
+  selPrio=btn.dataset.p;btn.classList.add('sel-'+selPrio.toLowerCase());
 }
 
-/* ══════════════════════════════════════════
-   PRIORITY
-══════════════════════════════════════════ */
-function selP(btn) {
-  document.querySelectorAll('.prio-btn').forEach(b=>{ b.className='prio-btn'; });
-  const p = btn.dataset.p; btn.classList.add('sel-'+p.toLowerCase()); selPrio = p;
-}
-
-/* ══════════════════════════════════════════
-   ADD / EDIT MODAL
-══════════════════════════════════════════ */
-function openModal(sectionLabel, itemId) {
-  editId = itemId || null; resetForm();
-  // populate section dropdown
-  const sel = document.getElementById('f-section');
-  sel.innerHTML = '';
-  sections.forEach(s=>{ const o=document.createElement('option'); o.value=s.label; o.textContent=s.label; sel.appendChild(o); });
-  if(sectionLabel) sel.value = sectionLabel;
-  if(itemId) {
-    const it = findItem(itemId);
-    if(it) {
-      document.getElementById('modal-heading').textContent = 'Edit item';
-      document.getElementById('f-title').value = it.title||'';
-      document.getElementById('f-notes').value = it.notes||'';
-      document.getElementById('f-date').value = it.date||'';
-      document.getElementById('f-type').value = it.type||'task';
-      sel.value = it.sectionLabel||sections[0].label;
-      document.getElementById('f-progress').value = it.progress||'';
-      if(it.done) document.getElementById('f-done-box').classList.add('checked');
-      document.getElementById('f-complete-date').value = it.completionDate||'';
-      selPrio = it.priority||'';
-      if(selPrio) document.querySelectorAll('.prio-btn').forEach(b=>{ if(b.dataset.p===selPrio) b.classList.add('sel-'+selPrio.toLowerCase()); });
+/* ── MODAL ── */
+function openModal(sectionLabel,itemId){
+  editId=itemId||null;
+  ['f-title','f-notes','f-date','f-progress','f-complete-date'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
+  document.getElementById('f-done-box').classList.remove('checked');
+  document.getElementById('f-type').value='task';
+  selPrio='';
+  document.querySelectorAll('.prio-btn').forEach(b=>{b.className='prio-btn';});
+  const sel=document.getElementById('f-section');
+  sel.innerHTML='';
+  sections.forEach(s=>{const o=document.createElement('option');o.value=s.label;o.textContent=s.label;sel.appendChild(o);});
+  if(sectionLabel)sel.value=sectionLabel;
+  if(itemId){
+    const it=findItem(itemId);
+    if(it){
+      document.getElementById('modal-heading').textContent='Edit item';
+      document.getElementById('f-title').value=it.title||'';
+      document.getElementById('f-notes').value=it.notes||'';
+      document.getElementById('f-date').value=it.date||'';
+      document.getElementById('f-type').value=it.type||'task';
+      sel.value=it.sectionLabel||sections[0].label;
+      document.getElementById('f-progress').value=it.progress||'';
+      if(it.done)document.getElementById('f-done-box').classList.add('checked');
+      document.getElementById('f-complete-date').value=it.completionDate||'';
+      selPrio=it.priority||'';
+      if(selPrio)document.querySelectorAll('.prio-btn').forEach(b=>{if(b.dataset.p===selPrio)b.classList.add('sel-'+selPrio.toLowerCase());});
     }
-  } else {
-    document.getElementById('modal-heading').textContent = 'Add item';
-    document.getElementById('f-date').value = today();
+  }else{
+    document.getElementById('modal-heading').textContent='Add item';
+    document.getElementById('f-date').value=today();
   }
   document.getElementById('modal-overlay').classList.add('open');
   setTimeout(()=>document.getElementById('f-title').focus(),60);
 }
-function resetForm() {
-  ['f-title','f-notes','f-date','f-progress','f-complete-date'].forEach(id=>{ const el=document.getElementById(id); if(el)el.value=''; });
-  document.getElementById('f-done-box').classList.remove('checked');
-  document.getElementById('f-type').value='task';
-  selPrio='';
-  document.querySelectorAll('.prio-btn').forEach(b=>{ b.className='prio-btn'; });
-}
-function closeModal() { document.getElementById('modal-overlay').classList.remove('open'); editId=null; }
+function closeModal(){document.getElementById('modal-overlay').classList.remove('open');editId=null;}
 
-async function saveItem() {
-  const title = document.getElementById('f-title').value.trim();
-  if(!title){ document.getElementById('f-title').style.borderColor='rgba(255,80,80,0.6)'; document.getElementById('f-title').focus(); return; }
+async function saveItem(){
+  const title=document.getElementById('f-title').value.trim();
+  if(!title){document.getElementById('f-title').style.borderColor='rgba(255,80,80,0.6)';document.getElementById('f-title').focus();return;}
   document.getElementById('f-title').style.borderColor='';
-  const sectionLabel = document.getElementById('f-section').value;
-  const sec = findSec(sectionLabel); if(!sec) return;
-  const item = {
-    id: editId ? String(editId) : String(Date.now()),
-    title,
-    notes: document.getElementById('f-notes').value.trim(),
-    date: document.getElementById('f-date').value,
-    type: document.getElementById('f-type').value,
-    priority: selPrio,
-    sectionLabel, secId: sec.id,
-    progress: document.getElementById('f-progress').value.trim(),
-    done: document.getElementById('f-done-box').classList.contains('checked'),
-    completionDate: document.getElementById('f-complete-date').value,
+  const sectionLabel=document.getElementById('f-section').value;
+  const sec=findSec(sectionLabel);if(!sec)return;
+  const item={
+    id:editId?String(editId):String(Date.now()),
+    title, notes:document.getElementById('f-notes').value.trim(),
+    date:document.getElementById('f-date').value, type:document.getElementById('f-type').value,
+    priority:selPrio, sectionLabel, secId:sec.id,
+    progress:document.getElementById('f-progress').value.trim(),
+    done:document.getElementById('f-done-box').classList.contains('checked'),
+    completionDate:document.getElementById('f-complete-date').value,
   };
-  if(editId) { sections.forEach(s=>{ if(items[s.id]) items[s.id]=items[s.id].filter(i=>i.id!==String(editId)); }); }
-  if(!items[sec.id]) items[sec.id]=[];
+  if(editId)sections.forEach(s=>{if(items[s.id])items[s.id]=items[s.id].filter(i=>i.id!==String(editId));});
+  if(!items[sec.id])items[sec.id]=[];
   items[sec.id].push(item);
-  closeModal(); renderCards();
+  closeModal();renderCards();
   await upsertItem(item);
 }
 
-/* ══════════════════════════════════════════
-   DETAIL VIEW
-══════════════════════════════════════════ */
-const PB = {Critical:'badge-critical',High:'badge-high',Medium:'badge-medium',Low:'badge-low'};
-function openDetail(itemId) {
-  const it = findItem(itemId); if(!it)return; detailId=itemId;
-  document.getElementById('detail-content').innerHTML = `
+/* ── DETAIL ── */
+const PB={Critical:'badge-critical',High:'badge-high',Medium:'badge-medium',Low:'badge-low'};
+function openDetail(itemId){
+  const it=findItem(itemId);if(!it)return;detailId=itemId;
+  document.getElementById('detail-content').innerHTML=`
     <div style="font-size:17px;font-weight:500;color:var(--gt);margin-bottom:16px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
       ${esc(it.title)}${it.done?'<span class="badge badge-done">Completed</span>':''}
     </div>
@@ -738,61 +611,55 @@ function openDetail(itemId) {
     <div class="detail-row"><span class="detail-key">Type</span><span class="detail-val" style="text-transform:capitalize;">${it.type}</span></div>
     ${it.date?`<div class="detail-row"><span class="detail-key">Date</span><span class="detail-val">${fmtDate(it.date)}</span></div>`:''}
     ${it.notes?`<div class="detail-row"><span class="detail-key">Notes</span><span class="detail-val" style="white-space:pre-wrap;">${esc(it.notes)}</span></div>`:''}
-    ${it.progress?`<div class="detail-row"><span class="detail-key">Progress / Completion notes</span><span class="detail-val" style="white-space:pre-wrap;">${esc(it.progress)}</span></div>`:''}
+    ${it.progress?`<div class="detail-row"><span class="detail-key">Progress</span><span class="detail-val" style="white-space:pre-wrap;">${esc(it.progress)}</span></div>`:''}
     ${it.completionDate?`<div class="detail-row"><span class="detail-key">Completion date</span><span class="detail-val">${fmtDate(it.completionDate)}</span></div>`:''}
   `;
   document.getElementById('detail-overlay').classList.add('open');
 }
-function closeDetail() { document.getElementById('detail-overlay').classList.remove('open'); detailId=null; }
-function editFromDetail() { const id=detailId; closeDetail(); const it=findItem(id); if(it)openModal(it.sectionLabel,id); }
-async function delFromDetail() {
-  const it = findItem(detailId); if(!it)return;
-  const id = String(it.id);
-  if(items[it.secId]) items[it.secId]=items[it.secId].filter(i=>i.id!==id);
-  closeDetail(); renderCards();
+function closeDetail(){document.getElementById('detail-overlay').classList.remove('open');detailId=null;}
+function editFromDetail(){const id=detailId;closeDetail();const it=findItem(id);if(it)openModal(it.sectionLabel,id);}
+async function delFromDetail(){
+  const it=findItem(detailId);if(!it)return;
+  const id=String(it.id);
+  if(items[it.secId])items[it.secId]=items[it.secId].filter(i=>i.id!==id);
+  closeDetail();renderCards();
   await deleteFromDB(id);
 }
 
-/* ══════════════════════════════════════════
-   QUICK ACTIONS ON CARD
-══════════════════════════════════════════ */
-async function quickToggle(secId, itemId, e) {
+/* ── QUICK ACTIONS ── */
+async function quickToggle(secId,itemId,e){
   e.stopPropagation();
-  const it = (items[secId]||[]).find(i=>i.id===String(itemId));
-  if(it){ it.done=!it.done; if(it.done&&!it.completionDate) it.completionDate=today(); renderCards(); await upsertItem(it); }
+  const it=(items[secId]||[]).find(i=>i.id===String(itemId));
+  if(it){it.done=!it.done;if(it.done&&!it.completionDate)it.completionDate=today();renderCards();await upsertItem(it);}
 }
-async function deleteItem(secId, itemId, e) {
-  if(e) e.stopPropagation();
-  const id = String(itemId);
-  if(items[secId]) items[secId]=items[secId].filter(i=>i.id!==id);
-  renderCards();
-  await deleteFromDB(id);
+async function deleteItem(secId,itemId,e){
+  if(e)e.stopPropagation();
+  const id=String(itemId);
+  if(items[secId])items[secId]=items[secId].filter(i=>i.id!==id);
+  renderCards();await deleteFromDB(id);
 }
 
-/* ══════════════════════════════════════════
-   OVERLAY CLICK
-══════════════════════════════════════════ */
-function ovc(e, id) {
-  if(e.target===document.getElementById(id)) {
-    if(id==='modal-overlay') closeModal();
-    else if(id==='detail-overlay') closeDetail();
-    else if(id==='import-overlay') closeImport();
+/* ── OVERLAY CLICK ── */
+function ovc(e,id){
+  if(e.target===document.getElementById(id)){
+    if(id==='modal-overlay')closeModal();
+    else if(id==='detail-overlay')closeDetail();
+    else if(id==='import-overlay')closeImport();
   }
 }
-document.addEventListener('keydown', e=>{ if(e.key==='Escape'){ closeModal(); closeDetail(); closeImport(); } });
+document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeModal();closeDetail();}});
 
-/* ══════════════════════════════════════════
-   RENDER CARDS
-══════════════════════════════════════════ */
-function renderCards() {
-  const root = document.getElementById('layout-root');
-  root.innerHTML = '';
-  sections.forEach(sec => {
-    if(!items[sec.id]) items[sec.id]=[];
-    const all=items[sec.id], active=all.filter(i=>!i.done), done=all.filter(i=>i.done);
-    const ibg=hr(sec.color,sec.ba), ibrd=hr(sec.color,sec.bb);
-    const slot=document.createElement('div'); slot.className='card-slot';
-    const card=document.createElement('div'); card.className='card'; card.dataset.sec=sec.id;
+/* ── RENDER ── */
+function renderCards(){
+  const root=document.getElementById('layout-root');
+  if(!root)return;
+  root.innerHTML='';
+  sections.forEach(sec=>{
+    if(!items[sec.id])items[sec.id]=[];
+    const all=items[sec.id],active=all.filter(i=>!i.done),done=all.filter(i=>i.done);
+    const ibg=hr(sec.color,sec.ba),ibrd=hr(sec.color,sec.bb);
+    const slot=document.createElement('div');slot.className='card-slot';
+    const card=document.createElement('div');card.className='card';card.dataset.sec=sec.id;
     card.setAttribute('draggable','true');
     card.addEventListener('dragstart',e=>onDragStart(e,sec.id));
     card.addEventListener('dragend',onDragEnd);
@@ -800,211 +667,157 @@ function renderCards() {
     card.addEventListener('drop',e=>onDrop(e,sec.id));
     card.innerHTML=`
       <div class="card-header">
-        <div class="drag-handle" title="Drag to reorder"><i class="ti ti-grip-vertical"></i></div>
+        <div class="drag-handle"><i class="ti ti-grip-vertical"></i></div>
         <div class="card-header-left">
           <div class="card-icon" style="background:${ibg};border:1px solid ${ibrd};"><i class="ti ${sec.icon}" style="color:${sec.color};"></i></div>
           <span class="card-title" id="title-${sec.id}">${esc(sec.label)}</span>
         </div>
         <div style="display:flex;align-items:center;gap:4px;">
-          <div class="card-header-actions">
-            <button class="icon-btn" title="Rename section" onclick="startRename('${sec.id}')"><i class="ti ti-pencil"></i></button>
-          </div>
+          <div class="card-header-actions"><button class="icon-btn" onclick="startRename('${sec.id}')"><i class="ti ti-pencil"></i></button></div>
           <span class="card-count">${active.length} active</span>
         </div>
-      </div>
-    `;
-    const listDiv=document.createElement('div'); listDiv.className='items-list';
-    if(active.length===0&&done.length===0) listDiv.innerHTML=`<div class="empty-hint">No items yet</div>`;
+      </div>`;
+    const listDiv=document.createElement('div');listDiv.className='items-list';
+    if(!active.length&&!done.length)listDiv.innerHTML='<div class="empty-hint">No items yet</div>';
     active.forEach(it=>listDiv.appendChild(mkItem(sec.id,it,sec.color)));
     card.appendChild(listDiv);
-    if(done.length>0){
-      const dv=document.createElement('div'); dv.className='done-divider';
+    if(done.length){
+      const dv=document.createElement('div');dv.className='done-divider';
       dv.innerHTML=`<div class="done-divider-line"></div><span class="done-divider-label">completed (${done.length})</span><div class="done-divider-line"></div>`;
       card.appendChild(dv);
-      const dl=document.createElement('div'); dl.className='done-list';
+      const dl=document.createElement('div');dl.className='done-list';
       done.forEach(it=>dl.appendChild(mkItem(sec.id,it,sec.color)));
       card.appendChild(dl);
     }
-    const ab=document.createElement('button'); ab.className='card-add-btn';
+    const ab=document.createElement('button');ab.className='card-add-btn';
     ab.innerHTML=`<i class="ti ti-plus"></i> Add to ${esc(sec.label)}`;
     ab.onclick=()=>openModal(sec.label);
     card.appendChild(ab);
-    slot.appendChild(card); root.appendChild(slot);
+    slot.appendChild(card);root.appendChild(slot);
   });
 }
 
-function mkItem(secId, item, color) {
+function mkItem(secId,item,color){
   const el=document.createElement('div');
   el.className='item'+(item.done?' done':'');
   el.onclick=()=>openDetail(item.id);
   if(item.type==='task'){
-    const cb=document.createElement('div'); cb.className='item-check';
+    const cb=document.createElement('div');cb.className='item-check';
     if(item.done){cb.style.background='rgba(120,120,255,0.22)';cb.style.borderColor='var(--ga)';}
-    cb.innerHTML=item.done?`<i class="ti ti-check" style="font-size:10px;color:rgba(150,140,255,0.9);"></i>`:'';
-    cb.onclick=e=>quickToggle(secId,item.id,e); el.appendChild(cb);
-  } else {
-    const dot=document.createElement('div'); dot.className='item-dot'; dot.style.background=color; el.appendChild(dot);
+    cb.innerHTML=item.done?'<i class="ti ti-check" style="font-size:10px;color:rgba(150,140,255,0.9);"></i>':'';
+    cb.onclick=e=>quickToggle(secId,item.id,e);el.appendChild(cb);
+  }else{
+    const dot=document.createElement('div');dot.className='item-dot';dot.style.background=color;el.appendChild(dot);
   }
-  const body=document.createElement('div'); body.className='item-body';
-  const tt=document.createElement('div'); tt.className='item-title'; tt.textContent=item.title; body.appendChild(tt);
-  const meta=document.createElement('div'); meta.className='item-meta';
-  if(item.priority) meta.innerHTML+=`<span class="badge ${PB[item.priority]||''}">${item.priority}</span>`;
-  if(item.date) meta.innerHTML+=`<span class="item-date-label"><i class="ti ti-calendar" style="font-size:10px;vertical-align:-1px;"></i> ${fmtDate(item.date)}</span>`;
-  if(item.done&&item.completionDate) meta.innerHTML+=`<span class="badge badge-done"><i class="ti ti-check" style="font-size:10px;"></i> ${fmtDate(item.completionDate)}</span>`;
-  body.appendChild(meta); el.appendChild(body);
-  const del=document.createElement('button'); del.className='item-del';
-  del.innerHTML=`<i class="ti ti-x"></i>`; del.title='Delete';
-  del.onclick=e=>deleteItem(secId,item.id,e); el.appendChild(del);
+  const body=document.createElement('div');body.className='item-body';
+  const tt=document.createElement('div');tt.className='item-title';tt.textContent=item.title;body.appendChild(tt);
+  const meta=document.createElement('div');meta.className='item-meta';
+  if(item.priority)meta.innerHTML+=`<span class="badge ${PB[item.priority]||''}">${item.priority}</span>`;
+  if(item.date)meta.innerHTML+=`<span class="item-date-label"><i class="ti ti-calendar" style="font-size:10px;vertical-align:-1px;"></i> ${fmtDate(item.date)}</span>`;
+  if(item.done&&item.completionDate)meta.innerHTML+=`<span class="badge badge-done"><i class="ti ti-check" style="font-size:10px;"></i> ${fmtDate(item.completionDate)}</span>`;
+  body.appendChild(meta);el.appendChild(body);
+  const del=document.createElement('button');del.className='item-del';del.innerHTML='<i class="ti ti-x"></i>';
+  del.onclick=e=>deleteItem(secId,item.id,e);el.appendChild(del);
   return el;
 }
 
-/* ══════════════════════════════════════════
-   EXCEL EXPORT
-══════════════════════════════════════════ */
-const XL_COLS=['ID','Title','Notes','Date','Type','Priority','Section','Progress / Completion Notes','Completed','Completion Date'];
+/* ── EXCEL EXPORT ── */
+const XL_COLS=['ID','Title','Notes','Date','Type','Priority','Section','Progress','Completed','Completion Date'];
 function exportExcel(){
   if(typeof XLSX==='undefined'){showToast('SheetJS not loaded','error');return;}
   const rows=[XL_COLS];
-  sections.forEach(sec=>{
-    (items[sec.id]||[]).forEach(it=>{
-      rows.push([it.id,it.title||'',it.notes||'',it.date||'',it.type||'task',it.priority||'',it.sectionLabel||sec.label,it.progress||'',it.done?'Yes':'No',it.completionDate||'']);
-    });
-  });
+  sections.forEach(sec=>(items[sec.id]||[]).forEach(it=>{
+    rows.push([it.id,it.title,it.notes,it.date,it.type,it.priority,it.sectionLabel,it.progress,it.done?'Yes':'No',it.completionDate]);
+  }));
   const ws=XLSX.utils.aoa_to_sheet(rows);
-  ws['!cols']=[{wch:20},{wch:35},{wch:45},{wch:14},{wch:8},{wch:12},{wch:18},{wch:45},{wch:12},{wch:16}];
+  ws['!cols']=[{wch:20},{wch:35},{wch:45},{wch:12},{wch:8},{wch:10},{wch:18},{wch:40},{wch:10},{wch:14}];
   const wb=XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb,ws,'Daily Notes');
-  const ws2=XLSX.utils.aoa_to_sheet([['Section ID','Section Label'],...sections.map(s=>[s.id,s.label])]);
-  ws2['!cols']=[{wch:18},{wch:20}];
-  XLSX.utils.book_append_sheet(wb,ws2,'Sections');
-  XLSX.writeFile(wb,`daily-notes-${today()}.xlsx`);
-  showToast('Exported successfully');
+  XLSX.utils.book_append_sheet(wb,ws,'SDWOpsTracker');
+  XLSX.writeFile(wb,'SDWOpsTracker-'+today()+'.xlsx');
+  showToast('Exported!');
 }
 
-/* ══════════════════════════════════════════
-   EXCEL IMPORT
-══════════════════════════════════════════ */
+/* ── EXCEL IMPORT ── */
 function openImport(){
   pendingImportData=null;
   document.getElementById('imp-preview').style.display='none';
   document.getElementById('imp-file').value='';
-  document.getElementById('imp-drop').querySelector('p').textContent='Click to browse or drag & drop your .xlsx file here';
-  const btn=document.getElementById('imp-confirm'); btn.disabled=true; btn.style.opacity='0.4'; btn.style.cursor='not-allowed';
+  document.getElementById('imp-drop').querySelector('p').textContent='Click or drag .xlsx file here';
+  const btn=document.getElementById('imp-confirm');btn.disabled=true;btn.style.opacity='0.4';
   document.getElementById('import-overlay').classList.add('open');
 }
-function closeImport(){ document.getElementById('import-overlay').classList.remove('open'); pendingImportData=null; }
-function impDragOver(e){ e.preventDefault(); document.getElementById('imp-drop').classList.add('over'); }
-function impDragLeave(){ document.getElementById('imp-drop').classList.remove('over'); }
-function impDrop(e){ e.preventDefault(); document.getElementById('imp-drop').classList.remove('over'); const f=e.dataTransfer.files[0]; if(f)parseXLSX(f); }
-function impFileChosen(e){ const f=e.target.files[0]; if(f)parseXLSX(f); }
-
+function closeImport(){document.getElementById('import-overlay').classList.remove('open');pendingImportData=null;}
+function impDragOver(e){e.preventDefault();document.getElementById('imp-drop').classList.add('over');}
+function impDragLeave(){document.getElementById('imp-drop').classList.remove('over');}
+function impDrop(e){e.preventDefault();document.getElementById('imp-drop').classList.remove('over');const f=e.dataTransfer.files[0];if(f)parseXLSX(f);}
+function impFileChosen(e){const f=e.target.files[0];if(f)parseXLSX(f);}
 function parseXLSX(file){
   if(typeof XLSX==='undefined'){showToast('SheetJS not loaded','error');return;}
   const reader=new FileReader();
   reader.onload=function(e){
     try{
       const wb=XLSX.read(e.target.result,{type:'array'});
-      const ws=wb.Sheets[wb.SheetNames[0]];
-      const rows=XLSX.utils.sheet_to_json(ws,{header:1,defval:''});
+      const rows=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{header:1,defval:''});
       if(!rows||rows.length<2){showToast('No data found','error');return;}
-      const header=rows[0].map(h=>String(h).trim().toLowerCase());
-      const fc=(names)=>{for(const n of names){const i=header.indexOf(n.toLowerCase());if(i>=0)return i;}return -1;};
-      const iID=fc(['id']),iTitle=fc(['title']),iNotes=fc(['notes']),iDate=fc(['date']),iType=fc(['type']);
-      const iPrio=fc(['priority']),iSec=fc(['section']),iProg=fc(['progress / completion notes','progress','completion notes']);
-      const iDone=fc(['completed']),iCompDate=fc(['completion date']);
-      if(iTitle<0){showToast('No "Title" column found','error');return;}
+      const hdr=rows[0].map(h=>String(h).trim().toLowerCase());
+      const fc=names=>{for(const n of names){const i=hdr.indexOf(n.toLowerCase());if(i>=0)return i;}return -1;};
+      const iT=fc(['title']),iN=fc(['notes']),iD=fc(['date']),iTy=fc(['type']);
+      const iP=fc(['priority']),iS=fc(['section']),iPr=fc(['progress']),iDo=fc(['completed']),iC=fc(['completion date']);
+      const iID=fc(['id']);
+      if(iT<0){showToast('No Title column','error');return;}
       const parsed=[];
       for(let r=1;r<rows.length;r++){
-        const row=rows[r]; const title=String(row[iTitle]||'').trim(); if(!title)continue;
-        const doneVal=iDone>=0?String(row[iDone]||'').trim().toLowerCase():'';
+        const row=rows[r];const title=String(row[iT]||'').trim();if(!title)continue;
+        const dv=iDo>=0?String(row[iDo]||'').toLowerCase():'';
         parsed.push({
           id:iID>=0&&row[iID]?String(row[iID]):String(Date.now()+Math.random()),
-          title, notes:iNotes>=0?String(row[iNotes]||'').trim():'',
-          date:iDate>=0?xlDateStr(row[iDate]):'',
-          type:iType>=0&&String(row[iType]||'').toLowerCase()==='note'?'note':'task',
-          priority:iPrio>=0?normPrio(String(row[iPrio]||'')):'',
-          sectionLabel:iSec>=0?String(row[iSec]||'').trim():sections[0].label,
-          progress:iProg>=0?String(row[iProg]||'').trim():'',
-          done:doneVal==='yes'||doneVal==='true'||doneVal==='1',
-          completionDate:iCompDate>=0?xlDateStr(row[iCompDate]):'',
+          title, notes:iN>=0?String(row[iN]||''):'', date:iD>=0?String(row[iD]||''):'',
+          type:iTy>=0&&String(row[iTy]||'').toLowerCase()==='note'?'note':'task',
+          priority:iP>=0?String(row[iP]||''):'', sectionLabel:iS>=0?String(row[iS]||''):sections[0].label,
+          progress:iPr>=0?String(row[iPr]||''):'', done:dv==='yes'||dv==='true'||dv==='1',
+          completionDate:iC>=0?String(row[iC]||''):''
         });
       }
-      if(!parsed.length){showToast('No valid rows found','error');return;}
+      if(!parsed.length){showToast('No valid rows','error');return;}
       pendingImportData=parsed;
       const prev=document.getElementById('imp-preview');
       prev.style.display='block';
-      prev.innerHTML=`<i class="ti ti-circle-check" style="color:rgba(80,210,140,0.9);margin-right:5px;"></i> Found <b style="color:var(--gt);">${parsed.length} item${parsed.length!==1?'s':''}</b> ready to import from <b style="color:var(--gt);">${esc(file.name)}</b>`;
+      prev.innerHTML=`<i class="ti ti-circle-check" style="color:rgba(80,210,140,0.9);margin-right:5px;"></i> Found <b style="color:var(--gt);">${parsed.length} items</b> in ${esc(file.name)}`;
       document.getElementById('imp-drop').querySelector('p').textContent=file.name;
-      const btn=document.getElementById('imp-confirm'); btn.disabled=false; btn.style.opacity='1'; btn.style.cursor='pointer';
-    }catch(err){console.error(err);showToast('Could not read file: '+err.message,'error');}
+      const btn=document.getElementById('imp-confirm');btn.disabled=false;btn.style.opacity='1';btn.style.cursor='pointer';
+    }catch(err){showToast('Read error: '+err.message,'error');}
   };
   reader.readAsArrayBuffer(file);
 }
-function xlDateStr(val){
-  if(!val)return '';
-  if(typeof val==='string'){
-    if(/^\d{4}-\d{2}-\d{2}/.test(val))return val.slice(0,10);
-    const m=val.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
-    if(m)return `${m[3]}-${m[2].padStart(2,'0')}-${m[1].padStart(2,'0')}`;
-    return '';
-  }
-  if(typeof val==='number'){
-    try{const d=XLSX.SSF.parse_date_code(val);if(d)return `${d.y}-${String(d.m).padStart(2,'0')}-${String(d.d).padStart(2,'0')}`;}catch(e){}
-  }
-  return '';
-}
-function normPrio(s){const map={critical:'Critical',high:'High',medium:'Medium',low:'Low'};return map[s.trim().toLowerCase()]||'';}
-
 async function confirmImport(){
   if(!pendingImportData)return;
-  let added=0, updated=0;
+  let added=0,updated=0;
   const toUpsert=[];
   pendingImportData.forEach(it=>{
     let sec=sections.find(s=>s.label===it.sectionLabel)||sections[0];
-    it.secId=sec.id; it.sectionLabel=sec.label;
+    it.secId=sec.id;it.sectionLabel=sec.label;
     let found=false;
-    sections.forEach(s=>{
-      const idx=(items[s.id]||[]).findIndex(i=>i.id===it.id);
-      if(idx>=0){items[s.id][idx]=it;found=true;updated++;}
-    });
+    sections.forEach(s=>{const idx=(items[s.id]||[]).findIndex(i=>i.id===it.id);if(idx>=0){items[s.id][idx]=it;found=true;updated++;}});
     if(!found){if(!items[sec.id])items[sec.id]=[];items[sec.id].push(it);added++;}
     toUpsert.push(it);
   });
-  closeImport(); renderCards();
-  showToast(`Importing: ${added} added, ${updated} updated`);
-  // bulk upsert to DB
-  setSyncState('saving','Importing…');
+  closeImport();renderCards();
+  showToast('Importing '+toUpsert.length+' items…');
   try{
-    // chunk upserts to avoid payload limits
-    for (let i = 0; i < toUpsert.length; i += 50) {
-      await sbFetch('items', {
-        method: 'POST',
-        headers: { 'Prefer': 'resolution=merge-duplicates,return=minimal' },
-        body: JSON.stringify(toUpsert.slice(i,i+50).map(itemToDbRow))
-      });
-    }
+    await dbUpsert(toUpsert.map(toRow));
+    showToast('Import done: '+added+' added, '+updated+' updated');
     setSyncState('ok','Import saved');
-    showToast(`Import complete: ${added} added, ${updated} updated`);
     setTimeout(()=>setSyncState('idle','All saved'),2000);
-  }catch(err){
-    const msg = (err && err.message) ? err.message : JSON.stringify(err);
-    setSyncState('error','Import DB error');
-    showToast('Import saved locally but DB sync failed: '+msg,'error');
+  }catch(e){
+    setSyncState('error','Import failed');
+    showToast('Import failed: '+e.message,'error');
   }
 }
 
-/* ══════════════════════════════════════════
-   INIT
-══════════════════════════════════════════ */
-document.getElementById('date-label').textContent = new Date().toLocaleDateString('en-ZA',{weekday:'long',year:'numeric',month:'long',day:'numeric'});
-
-// Show app immediately, sync DB in background
+/* ── INIT ── */
+document.getElementById('date-label').textContent=new Date().toLocaleDateString('en-ZA',{weekday:'long',year:'numeric',month:'long',day:'numeric'});
 renderCards();
-hideLoading();
-loadFromDB().then(() => subscribeRealtime()).catch(err => {
-  console.error('Init error:', err);
-  setSyncState('error', 'Init failed');
-});
+loadFromDB().then(()=>subscribeRealtime()).catch(e=>console.error('init',e));
 </script>
 <script>
 // SW
