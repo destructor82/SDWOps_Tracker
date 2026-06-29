@@ -117,8 +117,7 @@ body.arrange .arrange-hint{display:block;}
 .card-add-btn:hover{color:var(--gm);border-color:var(--gbl);}
 
 /* ─── LOADING OVERLAY ─── */
-#loading-screen{position:fixed;inset:0;z-index:999;background:rgba(0,0,0,0.88);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;transition:opacity .4s;}
-#loading-screen.hidden{opacity:0;pointer-events:none;}
+#loading-screen{position:fixed;inset:0;z-index:999;background:rgba(0,0,0,0.92);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;transition:opacity .35s ease;}
 .loading-spinner{width:40px;height:40px;border:3px solid var(--gbr);border-top-color:var(--ga);border-radius:50%;animation:spin .8s linear infinite;}
 @keyframes spin{to{transform:rotate(360deg);}}
 .loading-text{font-size:13px;color:var(--gm);}
@@ -385,9 +384,6 @@ function itemToDbRow(item) {
    LOAD ALL DATA
 ══════════════════════════════════════════ */
 async function loadFromDB() {
-  // Always show the app immediately — DB loads in background
-  renderCards();
-  hideLoading();
   setSyncState('loading', 'Connecting…');
   try {
     const data = await sbFetch('items?select=*&order=created_at.asc');
@@ -579,7 +575,13 @@ function fmtDate(s) { if(!s)return ''; const[y,m,d]=s.split('-'); return `${d}/$
 function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 function findItem(id) { for(const s of sections){ const it=(items[s.id]||[]).find(i=>i.id===String(id)); if(it)return it; } return null; }
 function findSec(label) { return sections.find(s=>s.label===label); }
-function hideLoading() { const el=document.getElementById('loading-screen'); el.classList.add('hidden'); setTimeout(()=>el.style.display='none',400); }
+function hideLoading() {
+  const el = document.getElementById('loading-screen');
+  if (!el) return;
+  el.style.opacity = '0';
+  el.style.pointerEvents = 'none';
+  setTimeout(() => { el.style.display = 'none'; }, 400);
+}
 
 /* ══════════════════════════════════════════
    TOAST
@@ -1010,7 +1012,14 @@ async function confirmImport(){
    INIT
 ══════════════════════════════════════════ */
 document.getElementById('date-label').textContent = new Date().toLocaleDateString('en-ZA',{weekday:'long',year:'numeric',month:'long',day:'numeric'});
-loadFromDB().then(()=>subscribeRealtime());
+
+// Show app immediately, sync DB in background
+renderCards();
+hideLoading();
+loadFromDB().then(() => subscribeRealtime()).catch(err => {
+  console.error('Init error:', err);
+  setSyncState('error', 'Init failed');
+});
 </script>
 <script>
 // SW
